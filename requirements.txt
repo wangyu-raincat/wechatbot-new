@@ -17,3 +17,7 @@ filelock
 requests
 beautifulsoup4
 lxml
+
+# ==================== QQ (NapCat / OneBot v11) ====================
+# 仅 PLATFORM='qq' 时用到，用于接收 NapCat 的 WebSocket 事件流
+websocket-client

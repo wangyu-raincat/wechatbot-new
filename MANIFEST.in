@@ -2,7 +2,23 @@ recursive-include emojis *
 recursive-include prompts *
 recursive-include templates *
 recursive-include Demo_Image *
-recursive-include forum_data *
+recursive-exclude prompts *.备份_*.md
+exclude prompts/小深.md
+prune prompts_local
+prune 数据备份
+exclude config_local.py
+exclude .env
+exclude .env.*
+exclude chat_contexts.json
+exclude user_timers.json
+exclude recurring_reminders.json
+prune CoreMemory
+prune Memory_Temp
+prune core_memory
+prune memory_temp
+prune forum_data
+prune qq_media
+global-exclude *.log *.pid *.lock qrcode.png onebot11_*.json
 include LICENSE
 # 一键启动器：__init__.py 会执行同目录的 Run.exe（见文件内注释）
 include Run.exe

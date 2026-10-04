@@ -32,6 +32,7 @@ import logging
 import os
 import re
 import sqlite3
+import threading
 import time
 
 # wechatauto 1.2.3 起对每次对外写动作（发送/点赞/评论…）默认按 natural 档限速：
@@ -40,12 +41,41 @@ import time
 # 同名环境变量优先（setdefault），要更保守可设 WECHATAUTO_RHYTHM=natural。
 os.environ.setdefault("WECHATAUTO_RHYTHM", "fast")
 
+from PIL import ImageStat
+
+from wechatauto.guia import WeChatGUI as _WeChatGUI
+from wechatauto.db import WeChatDB
+
 from wechatauto.wx import WeChat as _BaseWeChat
 from wechatauto.wx import Chat as _BaseChat
 from wechatauto import MediaDownloader
 from wechatauto.moment import MomentDB
 from wechatauto.param import WxResponse
 from wechatauto import wxlog
+
+
+def _desktop_available_theme_compatible(self):
+    """Treat both light and dark WeChat themes as a visible desktop.
+
+    wechatauto 1.2.0 only checks for a minimum amount of near-white pixels,
+    which incorrectly rejects a healthy dark-mode WeChat window.  A real
+    captured window has meaningful channel variation; locked/disconnected
+    captures are effectively blank.
+    """
+    if not self.is_alive():
+        return False
+    try:
+        image = self._grab_screen(self.render_rect).convert("RGB")
+        stats = ImageStat.Stat(image.resize((64, 64)))
+    except Exception:
+        return False
+    return max(stats.stddev) >= 4.0 and any(high - low >= 24 for low, high in stats.extrema)
+
+
+_WeChatGUI.desktop_available = _desktop_available_theme_compatible
+# Do not minimize the user's other applications while preparing a send.  The
+# WeChat window is raised only for the few seconds needed by the 4.x client.
+_WeChatGUI._minimize_blockers = lambda self: 0
 
 log = logging.getLogger("wxbot")
 
@@ -851,7 +881,41 @@ class WeChat(_BaseWeChat):
     """兼容层主类：在 wechatauto.wx.WeChat 之上补齐 bot 需要的接口。"""
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        account = kwargs.pop("account", None)
+        if not account:
+            try:
+                from config import WECHAT_ACCOUNT
+                account = WECHAT_ACCOUNT
+            except (ImportError, AttributeError):
+                account = None
+
+        if not account:
+            super().__init__(*args, **kwargs)
+        else:
+            nickname = kwargs.pop("nickname", None)
+            start_listener = kwargs.pop("start_listener", False)
+            debug = kwargs.pop("debug", False)
+            self._gui = _WeChatGUI()
+            self._db = WeChatDB(account=account)
+            info = self._db.get_self_info()
+            self.nickname = nickname or info.get("nick_name") or info.get("username") or ""
+            self.who = self.nickname
+            self._wxid = info.get("username") or ""
+            self.listen = {}
+            self._listener = None
+            self._listen_wrappers = {}
+            self._listener_is_listening = False
+            self._listener_stop_event = threading.Event()
+            self._current_chat = None
+            self._listen_all_active = False
+            self._listen_all_callback = None
+            self._moment_api = None
+            self._moment = None
+            if start_listener:
+                self._listener_start()
+            if debug:
+                wxlog.set_debug(True)
+                wxlog.debug("Debug mode is on")
         self._media = MediaDownloader(self._db)
         self._recall_guard = None
         self._moment_db_cache = None
@@ -951,16 +1015,36 @@ class WeChat(_BaseWeChat):
         return who
 
     def SendMsg(self, msg, who=None, **kwargs):
-        return super().SendMsg(msg, who=self._display_name(who), **kwargs)
+        user32 = __import__('ctypes').windll.user32
+        previous = user32.GetForegroundWindow()
+        try:
+            return super().SendMsg(msg, who=self._display_name(who), **kwargs)
+        finally:
+            try:
+                self._gui.restore_zorder()
+                if previous and previous != self._gui.main_hwnd and user32.IsWindow(previous):
+                    user32.SetForegroundWindow(previous)
+            except Exception:
+                pass
 
     def SendFiles(self, filepath, who=None, **kwargs):
+        user32 = __import__('ctypes').windll.user32
+        previous = user32.GetForegroundWindow()
         who = self._display_name(who)
-        if isinstance(filepath, str) and filepath.lower().endswith(_IMG_EXTS):
+        try:
+            if isinstance(filepath, str) and filepath.lower().endswith(_IMG_EXTS):
+                try:
+                    return self._gui.send_image(filepath, who)
+                except Exception as e:
+                    log.warning("send_image 失败，回退为文件发送: %s", e)
+            return super().SendFiles(filepath, who=who, **kwargs)
+        finally:
             try:
-                return self._gui.send_image(filepath, who)
-            except Exception as e:
-                log.warning("send_image 失败，回退为文件发送: %s", e)
-        return super().SendFiles(filepath, who=who, **kwargs)
+                self._gui.restore_zorder()
+                if previous and previous != self._gui.main_hwnd and user32.IsWindow(previous):
+                    user32.SetForegroundWindow(previous)
+            except Exception:
+                pass
 
     # ----------------------------------------------------------- 会话/窗口
 

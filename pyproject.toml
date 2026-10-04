@@ -8,8 +8,7 @@ version = "2.2.8.2"
 description = "智能微信聊天机器人（基于 KouriChat 重构）：接入 DeepSeek/GPT/Gemini 大模型，拟人化角色扮演、记忆、情绪表情包、定时任务、联网搜索；兼容微信 4.1.12+，底层使用 wechatauto-replica"
 readme = "readme.md"
 requires-python = ">=3.9"
-license = "GPL-3.0-or-later"
-license-files = ["LICENSE"]
+license = { text = "GPL-3.0-or-later" }
 keywords = ["wechat", "weixin", "wechat-bot", "chatbot", "ai", "llm", "deepseek", "gpt", "kourichat", "roleplay", "automation", "wechatauto"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -35,24 +34,48 @@ dependencies = [
     "requests",
     "beautifulsoup4",
     "lxml",
+    "websocket-client",
 ]
 
 [project.urls]
-Homepage = "https://github.com/fanyuantaier/wechatbot-new"
-Source = "https://github.com/fanyuantaier/wechatbot-new"
-Issues = "https://github.com/fanyuantaier/wechatbot-new/issues"
-Download-offline = "https://livefile.xesimg.com/programme/python_assets/cf1b5c02b7c200b6da614e373b7ed475.zip"
+Homepage = "https://github.com/sangheegulino168-design/wechatbot-new"
+Source = "https://github.com/sangheegulino168-design/wechatbot-new"
+Issues = "https://github.com/sangheegulino168-design/wechatbot-new/issues"
 
 [project.scripts]
 wechatbot = "bot:main"
 wechatbot-webui = "config_editor:main"
 
 [tool.setuptools]
-py-modules = ["bot", "config", "config_editor", "run", "test_bot", "test_wxbot", "wxbot"]
+py-modules = ["bot", "config", "config_editor", "run", "test_bot", "test_wxbot", "wxbot", "qqbot"]
 include-package-data = true
 
 [tool.setuptools.packages.find]
-include = ["emojis*", "prompts*", "templates*", "Demo_Image*", "forum_data*"]
+include = ["emojis*", "prompts*", "templates*", "Demo_Image*"]
+exclude = [
+    "prompts_local*",
+    "CoreMemory*",
+    "Memory_Temp*",
+    "core_memory*",
+    "memory_temp*",
+    "forum_data*",
+    "qq_media*",
+    "数据备份*",
+]
 
 [tool.setuptools.package-data]
 "*" = ["*", "*/*", "*/*/*", "*/*/*/*"]
+
+[tool.setuptools.exclude-package-data]
+"*" = [
+    "*.备份_*.md",
+    "小深.md",
+    "config_local.py",
+    ".env",
+    ".env.*",
+    "*.log",
+    "*.pid",
+    "*.lock",
+    "qrcode.png",
+    "onebot11_*.json",
+]

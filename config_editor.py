@@ -3,7 +3,7 @@
 # ***********************************************************************
 # Copyright (C) 2025, iwyxdxl
 # Licensed under GNU GPL-3.0 or higher, see the LICENSE file for details.
-# 
+#
 # This file is part of WeChatBot.
 # WeChatBot is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -37,19 +37,163 @@ import logging
 from queue import Queue, Empty
 import time
 import json
+import runpy
+import sys
 from werkzeug.utils import secure_filename
 import uuid
 import base64
 import mimetypes
 from datetime import datetime
 import zipfile
+from urllib.parse import urlsplit
 
 app = Flask(__name__)
+
+_LOCAL_WEBUI_HOSTS = {'127.0.0.1', 'localhost', '::1'}
+_STATE_CHANGING_METHODS = {'POST', 'PUT', 'PATCH', 'DELETE'}
+
+
+def _request_hostname(value):
+    try:
+        return (urlsplit('//' + value).hostname or '').lower()
+    except ValueError:
+        return ''
+
+
+@app.before_request
+def enforce_local_webui_boundary():
+    """阻止 DNS rebinding 和跨站表单操作本地配置器。
+
+    无 Origin/Referer 的本地 CLI 请求仍可用，浏览器的跨站请求会被
+    Origin、Referer 或 Sec-Fetch-Site 拦截。
+    """
+    if _request_hostname(request.host) not in _LOCAL_WEBUI_HOSTS:
+        return jsonify({'error': '仅允许从本机访问配置器'}), 403
+
+    if request.method not in _STATE_CHANGING_METHODS:
+        return None
+
+    fetch_site = (request.headers.get('Sec-Fetch-Site') or '').lower()
+    if fetch_site == 'cross-site':
+        return jsonify({'error': '已拒绝跨站请求'}), 403
+
+    for header_name in ('Origin', 'Referer'):
+        header_value = request.headers.get(header_name)
+        if not header_value:
+            continue
+        try:
+            header_host = (urlsplit(header_value).hostname or '').lower()
+        except ValueError:
+            header_host = ''
+        if header_host not in _LOCAL_WEBUI_HOSTS:
+            return jsonify({'error': '已拒绝非本场来源请求'}), 403
+
+    return None
+
+SECRET_ENV_FIELDS = {
+    'DEEPSEEK_API_KEY': 'DEEPSEEK_API_KEY',
+    'MOONSHOT_API_KEY': 'MOONSHOT_API_KEY',
+    'ONLINE_API_KEY': 'ONLINE_API_KEY',
+    'ASSISTANT_API_KEY': 'ASSISTANT_API_KEY',
+    'FORUM_API_KEY': 'FORUM_API_KEY',
+    'QQ_ONEBOT_TOKEN': 'QQ_ONEBOT_TOKEN',
+    'LOGIN_PASSWORD': 'BOT_LOGIN_PASSWORD',
+}
+
+LOCAL_CONFIG_FIELDS = {
+    'WECHAT_ACCOUNT', 'LISTEN_LIST', 'QQ_SELF_ID', 'QQ_NAPCAT_LAUNCHER',
+    'QQ_ONEBOT_HTTP', 'QQ_ONEBOT_WS', 'GROUP_KEYWORD_LIST',
+}
+
+
+def _write_user_environment(name, value):
+    """Save a secret outside tracked source without logging its value."""
+    value = str(value or '').strip()
+    if os.name == 'nt':
+        import winreg
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, 'Environment') as key:
+            if value:
+                winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
+            else:
+                try:
+                    winreg.DeleteValue(key, name)
+                except FileNotFoundError:
+                    pass
+    if value:
+        os.environ[name] = value
+    else:
+        os.environ.pop(name, None)
+
+
+def _update_local_config(values):
+    """Write private account/listener settings only to ignored config_local.py."""
+    if not values:
+        return
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(script_dir, 'config_local.py')
+    lock_path = path + '.lock'
+    with FileLock(lock_path):
+        if os.path.exists(path):
+            with open(path, 'r', encoding='utf-8') as handle:
+                lines = handle.readlines()
+        else:
+            lines = [
+                '# Local-only configuration. This file is ignored by Git.\n',
+                '# Never commit credentials, account identifiers, or chat targets.\n\n',
+            ]
+
+        remaining = dict(values)
+        updated = []
+        for line in lines:
+            match = re.match(r'^\s*(\w+)\s*=.*', line)
+            if match and match.group(1) in remaining:
+                name = match.group(1)
+                updated.append(f'{name} = {remaining.pop(name)!r}\n')
+            else:
+                updated.append(line)
+        if remaining:
+            if updated and updated[-1].strip():
+                updated.append('\n')
+            for name, value in sorted(remaining.items()):
+                updated.append(f'{name} = {value!r}\n')
+
+        with tempfile.NamedTemporaryFile(
+            'w', delete=False, dir=script_dir, encoding='utf-8'
+        ) as temp_file:
+            temp_name = temp_file.name
+            temp_file.writelines(updated)
+        os.replace(temp_name, path)
 
 # ===== 统一的论坛数据目录 =====
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FORUM_DATA_DIR = os.path.join(BASE_DIR, 'forum_data')
 FORUM_AVATAR_DIR = os.path.join(FORUM_DATA_DIR, 'avatar')
+BUILTIN_PROMPTS_DIR = os.path.join(BASE_DIR, 'prompts')
+LOCAL_PROMPTS_DIR = os.path.join(BASE_DIR, 'prompts_local')
+
+
+def _prompt_names():
+    names = set()
+    for directory in (BUILTIN_PROMPTS_DIR, LOCAL_PROMPTS_DIR):
+        if os.path.isdir(directory):
+            names.update(
+                filename[:-3]
+                for filename in os.listdir(directory)
+                if filename.endswith('.md')
+            )
+    return sorted(names)
+
+
+def _prompt_read_path(filename):
+    local_path = os.path.join(LOCAL_PROMPTS_DIR, filename)
+    if os.path.isfile(local_path):
+        return local_path
+    return os.path.join(BUILTIN_PROMPTS_DIR, filename)
+
+
+def _prompt_write_path(filename):
+    os.makedirs(LOCAL_PROMPTS_DIR, exist_ok=True)
+    return os.path.join(LOCAL_PROMPTS_DIR, filename)
 
 def _ensure_forum_dir_exists():
     try:
@@ -690,23 +834,20 @@ def bot_heartbeat():
 def parse_config():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(script_dir, 'config.py')
-    config = {}
     try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith('#') or not line:
-                    continue
-                match = re.match(r'^(\w+)\s*=\s*(.+)$', line)
-                if match:
-                    var_name = match.group(1)
-                    var_value_str = match.group(2)
-                    try:
-                        var_value = ast.literal_eval(var_value_str)
-                        config[var_name] = var_value
-                    except:
-                        config[var_name] = var_value_str
-        return config
+        inserted = script_dir not in sys.path
+        if inserted:
+            sys.path.insert(0, script_dir)
+        try:
+            sys.modules.pop('config_local', None)
+            namespace = runpy.run_path(config_path)
+        finally:
+            if inserted:
+                sys.path.remove(script_dir)
+        return {
+            name: value for name, value in namespace.items()
+            if name.isupper()
+        }
     except FileNotFoundError:
         raise Exception(f"配置文件不存在于: {config_path}")
 
@@ -714,6 +855,19 @@ def update_config(new_values):
     """
     更新配置文件内容，确保文件写入安全性和原子性，避免文件被清空或损坏。
     """
+    new_values = dict(new_values)
+
+    for field, env_name in SECRET_ENV_FIELDS.items():
+        if field in new_values:
+            _write_user_environment(env_name, new_values.pop(field))
+
+    local_values = {
+        field: new_values.pop(field)
+        for field in tuple(new_values)
+        if field in LOCAL_CONFIG_FIELDS
+    }
+    _update_local_config(local_values)
+
     script_dir = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(script_dir, 'config.py')
     lock_path = config_path + '.lock'  # 文件锁路径
@@ -847,10 +1001,7 @@ def quick_start():
 
     try:
         config = parse_config()
-        prompt_files_dir = 'prompts'
-        if not os.path.exists(prompt_files_dir):
-            os.makedirs(prompt_files_dir)
-        prompt_files_list = [f[:-3] for f in os.listdir(prompt_files_dir) if f.endswith('.md')]
+        prompt_files_list = _prompt_names()
         
         current_api_provider = 'weapis'
         current_custom_base_url = ''
@@ -1017,10 +1168,7 @@ def index():
 
     # GET 请求
     try:
-        prompt_files_dir = 'prompts'
-        if not os.path.exists(prompt_files_dir):
-            os.makedirs(prompt_files_dir)
-        prompt_files = [f[:-3] for f in os.listdir(prompt_files_dir) if f.endswith('.md')]
+        prompt_files = _prompt_names()
         config = parse_config() # 重新解析以获取最新配置
         chat_context_users = get_chat_context_users()
 
@@ -1050,7 +1198,6 @@ def safe_filename(filename):
 @app.route('/edit_prompt/<filename>', methods=['GET', 'POST'])
 @login_required
 def edit_prompt(filename):
-    safe_dir = os.path.abspath('prompts')
     # 从path中移除.md后缀，如果存在的话，因为safe_filename会处理
     if filename.endswith('.md'):
         filename_no_ext = filename[:-3]
@@ -1061,7 +1208,7 @@ def edit_prompt(filename):
     # 注意：前端JS在调用此接口时，filename参数应该是包含.md的
     # 所以这里的safe_filename应该针对传入的filename
     processed_filename = safe_filename(filename) 
-    filepath = os.path.join(safe_dir, processed_filename)
+    filepath = _prompt_read_path(processed_filename)
 
     if request.method == 'POST':
         content = request.form.get('content', '')
@@ -1070,22 +1217,16 @@ def edit_prompt(filename):
         if not new_filename_from_form.endswith('.md'):
             new_filename_from_form += '.md'
         new_filename_safe = safe_filename(new_filename_from_form)
-        new_filepath = os.path.join(safe_dir, new_filename_safe)
+        new_filepath = _prompt_write_path(new_filename_safe)
 
         try:
-            # 如果文件名改变了
-            if new_filename_safe != processed_filename:
-                if os.path.exists(new_filepath):
+            old_local_path = os.path.join(LOCAL_PROMPTS_DIR, processed_filename)
+            if new_filename_safe != processed_filename and os.path.exists(new_filepath):
                     return "新文件名已存在", 400 # 返回错误状态码
-                # 检查旧文件是否存在
-                if not os.path.exists(filepath):
-                     return "原文件不存在，无法重命名", 404
-                os.rename(filepath, new_filepath)
-                filepath = new_filepath # 更新filepath为新路径，以便写入内容
-            
-            # 写入内容
-            with open(filepath, 'w', encoding='utf-8', newline='') as f:
+            with open(new_filepath, 'w', encoding='utf-8', newline='') as f:
                 f.write(content)
+            if new_filename_safe != processed_filename and os.path.isfile(old_local_path):
+                os.remove(old_local_path)
             # 修改后，不需要重定向到 prompt_list，前端会刷新或处理
             return jsonify({'status': 'success', 'message': 'Prompt已保存'}), 200
         except Exception as e:
@@ -1120,13 +1261,11 @@ def create_prompt():
             filename += '.md'
         filename = safe_filename(filename) # 应用安全文件名处理
         
-        filepath = os.path.join('prompts', filename)
+        filepath = _prompt_write_path(filename)
         if os.path.exists(filepath):
             return "文件已存在", 409 # 409 Conflict 更合适
             
         try:
-            if not os.path.exists('prompts'): # 确保目录存在
-                os.makedirs('prompts')
             with open(filepath, 'w', encoding='utf-8', newline='') as f:
                 f.write(content)
             # 返回成功JSON，而不是重定向
@@ -1140,7 +1279,7 @@ def create_prompt():
 @app.route('/delete_prompt/<filename>', methods=['POST'])
 @login_required
 def delete_prompt(filename):
-    safe_dir = os.path.abspath('prompts')
+    safe_dir = os.path.abspath(LOCAL_PROMPTS_DIR)
     filepath = os.path.join(safe_dir, safe_filename(filename))
     
     if os.path.isfile(filepath) and filepath.startswith(safe_dir):
@@ -1560,9 +1699,21 @@ def import_config():
         return jsonify({'error': f'导入失败: {str(e)}'}), 500
 
 def create_backup_directory():
-    """创建备份目录"""
+    """在仓库外创建备份目录，避免私密数据误入 Git。"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_dir = os.path.join(BASE_DIR, "数据备份", f"{timestamp}_导入备份")
+    configured_root = os.environ.get('WECHATBOT_BACKUP_DIR', '').strip()
+    if configured_root:
+        backup_root = os.path.abspath(os.path.expanduser(configured_root))
+    elif os.name == 'nt':
+        local_app_data = os.environ.get('LOCALAPPDATA') or os.path.expanduser('~')
+        backup_root = os.path.join(local_app_data, 'wechatbot-new', '数据备份')
+    else:
+        xdg_data_home = os.environ.get('XDG_DATA_HOME')
+        if not xdg_data_home:
+            xdg_data_home = os.path.join(os.path.expanduser('~'), '.local', 'share')
+        backup_root = os.path.join(xdg_data_home, 'wechatbot-new', 'backups')
+
+    backup_dir = os.path.join(backup_root, f"{timestamp}_导入备份")
     os.makedirs(backup_dir, exist_ok=True)
     return backup_dir
 
@@ -1572,9 +1723,9 @@ def backup_existing_data(backup_dir):
     
     try:
         # 备份 prompts 文件夹
-        prompts_dir = os.path.join(BASE_DIR, 'prompts')
+        prompts_dir = LOCAL_PROMPTS_DIR
         if os.path.exists(prompts_dir):
-            backup_prompts = os.path.join(backup_dir, 'prompts')
+            backup_prompts = os.path.join(backup_dir, 'prompts_local')
             shutil.copytree(prompts_dir, backup_prompts)
             backed_up_items.append('prompts文件夹')
         
@@ -1629,6 +1780,12 @@ def backup_existing_data(backup_dir):
             backup_config = os.path.join(backup_dir, 'config.py')
             shutil.copy2(config_file, backup_config)
             backed_up_items.append('config.py文件')
+
+        # 备份仅存在本机且被 Git 忽略的账号/监听配置。
+        local_config_file = os.path.join(BASE_DIR, 'config_local.py')
+        if os.path.exists(local_config_file):
+            shutil.copy2(local_config_file, os.path.join(backup_dir, 'config_local.py'))
+            backed_up_items.append('config_local.py文件')
         
         return backed_up_items
     except Exception as e:
@@ -1673,7 +1830,7 @@ def import_directory_data(source_dir):
         # 导入 prompts 文件夹
         source_prompts = os.path.join(source_dir, 'prompts')
         if os.path.exists(source_prompts):
-            target_prompts = os.path.join(BASE_DIR, 'prompts')
+            target_prompts = LOCAL_PROMPTS_DIR
             if os.path.exists(target_prompts):
                 shutil.rmtree(target_prompts)
             shutil.copytree(source_prompts, target_prompts)
@@ -1762,8 +1919,18 @@ def import_files_data(files_dict):
                 if not relative_path:
                     continue
                 
-                # 创建完整的文件路径
-                full_path = os.path.join(temp_dir, relative_path.replace('/', os.sep))
+                # 创建完整的文件路径，并阻止绝对路径或 ../ 越出临时目录。
+                normalized_path = relative_path.replace('/', os.sep)
+                if os.path.isabs(normalized_path):
+                    raise ValueError(f"拒绝绝对路径: {relative_path}")
+                full_path = os.path.abspath(os.path.join(temp_dir, normalized_path))
+                temp_root = os.path.abspath(temp_dir)
+                try:
+                    stays_inside_temp = os.path.commonpath([temp_root, full_path]) == temp_root
+                except ValueError:
+                    stays_inside_temp = False
+                if not stays_inside_temp:
+                    raise ValueError(f"拒绝越界路径: {relative_path}")
                 
                 # 确保目录存在
                 dir_path = os.path.dirname(full_path)
@@ -2798,7 +2965,7 @@ def check_should_post_forum(character_name):
 def load_character_prompt(character_name):
     """读取角色设定文件"""
     try:
-        prompt_file = os.path.join('prompts', f'{character_name}.md')
+        prompt_file = _prompt_read_path(f'{safe_filename(character_name)}.md')
         if os.path.exists(prompt_file):
             with open(prompt_file, 'r', encoding='utf-8') as f:
                 return f.read()
@@ -3785,7 +3952,7 @@ def get_default_config():
         "GROUP_CHAT_RESPONSE_PROBABILITY": 100,
         "GROUP_KEYWORD_REPLY_IGNORE_PROBABILITY": True,
         "ENABLE_LOGIN_PASSWORD": False,
-        "LOGIN_PASSWORD": '123456',
+        "LOGIN_PASSWORD": '',
         "PORT": 5000,
         "ENABLE_REMINDERS": True,
         "ALLOW_REMINDERS_IN_QUIET_TIME": True,
@@ -4011,8 +4178,7 @@ if __name__ == '__main__':
     print("\033[90m   → 浏览器将自动打开，如未打开请手动访问上述地址\033[0m")
     if config.get('ENABLE_LOGIN_PASSWORD', False):
         print("")
-        print(f"\033[33m🔐 登录密码: {config.get('LOGIN_PASSWORD', '未设置')}\033[0m")
-        print("\033[90m   → 请妥善保管，勿泄露给他人\033[0m")
+        print("\033[33m🔐 登录密码保护已启用（密码不会在终端显示）\033[0m")
     print("")
     print("\033[33m💡 常见问题：\033[0m")
     print("\033[90m   问题1: 点击Start Bot没反应，提示微信窗口找不到\033[0m")
@@ -4032,4 +4198,3 @@ if __name__ == '__main__':
     # 根据配置决定绑定地址
     #host = "0.0.0.0" if config.get('ENABLE_LOGIN_PASSWORD', False) else "127.0.0.1"
     app.run(host= "127.0.0.1", debug=False, port=PORT)
-    

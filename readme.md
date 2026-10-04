@@ -7,11 +7,15 @@
 > I'm starting senior high school and will register tomorrow (Aug 23). After school starts I'll have almost no time to keep updating (Sundays if possible). Please discuss issues in the Issues section or ask an AI. Thanks for your support!
 
 
+> 本分支在上游 `fanyuantaier/wechatbot-new` 基础上增加了 QQ/NapCat（OneBot v11）通道，并保留原有微信通道。QQ 配置见 [QQ接入说明.md](QQ接入说明.md)。
+>
+> 发布安全：真实 API Key、OneBot Token、账号、聊天上下文、记忆、日志和二维码不得提交。请从 `config_local.example.py` 复制本地配置，并按 [SECURITY.md](SECURITY.md) 使用环境变量保存秘密。
+
 ![PyPI version](https://img.shields.io/pypi/v/wechatbot-new)
 ![PyPI downloads](https://img.shields.io/pypi/dw/wechatbot-new)
 ![Python](https://img.shields.io/pypi/pyversions/wechatbot-new)
-![License](https://img.shields.io/github/license/fanyuantaier/wechatbot-new)
-![GitHub stars](https://img.shields.io/github/stars/fanyuantaier/wechatbot-new)
+![License](https://img.shields.io/github/license/sangheegulino168-design/wechatbot-new)
+![GitHub stars](https://img.shields.io/github/stars/sangheegulino168-design/wechatbot-new)
 
 - 这是一个智能微信聊天机器人。通过wechatauto-replica收发微信消息，调用deepseek、gpt、gemini等大语言模型生成回复消息。
 - 原项目仓库：https://github.com/KouriChat/KouriChat
@@ -59,7 +63,7 @@
 5. AI时间感知（年-月-日 星期 时-分-秒）
 6. 主动发送消息及合并处理多条消息或表情包。
 7. 前端WebUI支持：启动程序、修改配置文件、生成和管理Prompt
-8. 记忆功能：调用AI总结聊天记录保存到Prompt或者独立核心记忆文件
+8. 记忆功能：调用 AI 总结聊天记录，仅保存到 Git 忽略的独立核心记忆文件
 9. 让AI设置定时任务功能，例如"15分钟后提醒我出门"或"每天早上八点叫我起床"，并支持通过语音通话提醒
 10. 支持联网搜索
 11. 接收语音消息（需在微信设置中开启"聊天中的语音消息自动转文字"功能）

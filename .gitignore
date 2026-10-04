@@ -20,6 +20,7 @@ libs/
 # 运行时生成的数据
 chat_contexts.json
 user_timers.json
+recurring_reminders.json
 core_memory/
 CoreMemory/
 memory_temp/
@@ -27,6 +28,37 @@ Memory_Temp/
 forum_data/npc_config.json
 # 「读聊天记录」生成的风格档案（内容来自本地聊天记录，不入库也不发包）
 HistoryProfiles/
+forum_data/*.json
+forum_data/avatar/
+qq_media/
+prompts_local/
+数据备份/
+config_local.py
+config.local.py
+*.pid
+*.lock
+*.tmp
+*.bak
+
+# 本地账号、认证和会话材料
+.env
+.env.*
+!.env.example
+credentials/
+secrets/
+cookies/
+sessions/
+qrcode.png
+**/qrcode.png
+onebot11_*.json
+
+# 本机调试截图与私人备份
+wechat-window*.png
+wechat-*-open.png
+_backup_*/
+prompts/*.备份_*.md
+prompts/小深.md
+prompts/小林.md
 
 # 日志
 *.log

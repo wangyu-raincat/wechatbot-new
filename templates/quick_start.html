@@ -329,7 +329,7 @@
 
             <div class="form-group">
                 <label for="quick_start_api_key">API Key:</label>
-                <input type="text" id="quick_start_api_key" name="quick_start_api_key" value="{{ config.DEEPSEEK_API_KEY or '' }}" placeholder="请输入 API Key" class="api-key-input">
+                <input type="password" id="quick_start_api_key" name="quick_start_api_key" value="{{ config.DEEPSEEK_API_KEY or '' }}" placeholder="请输入 API Key" class="api-key-input" autocomplete="new-password">
                 <small class="api-key-hint">{{ "出于安全考虑，已隐藏完整API Key。如需修改，请直接输入新的API Key。" if "*" in (config.DEEPSEEK_API_KEY or '') else "" }}</small>
                 <small id="api_key_note">申请 WeAPIs 密钥后，聊天、图片识别、联网搜索功能将使用此 Key 和推荐配置。</small>
             </div>

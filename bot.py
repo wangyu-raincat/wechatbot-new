@@ -33,11 +33,18 @@ from urllib.parse import urlparse
 import os
 import ctypes
 os.environ["PROJECT_NAME"] = 'iwyxdxl/WeChatBot_WXAUTO_SE'
-# 消息收发由 wxbot 兼容层驱动（wechatauto，适配微信 4.x 自绘渲染）
-from wxbot import WeChat, is_wechat_asset_url
-from wechatauto.param import WxParam
-WxParam.ENABLE_FILE_LOGGER = False
-WxParam.FORCE_MESSAGE_XBIAS = True
+# 消息收发由兼容层驱动，按 config.PLATFORM 选择：
+#   'wechat' → wxbot（wechatauto，数据库收信 + 坐标/OCR 发信，适配微信 4.x 自绘渲染）
+#   'qq'     → qqbot（NapCat / OneBot v11，WebSocket 收信 + HTTP 发信）
+if PLATFORM == 'qq':
+    from qqbot import WeChat
+    def is_wechat_asset_url(_url):
+        return False
+else:
+    from wxbot import WeChat, is_wechat_asset_url
+    from wechatauto.param import WxParam
+    WxParam.ENABLE_FILE_LOGGER = False
+    WxParam.FORCE_MESSAGE_XBIAS = True
 
 
 # 生成用户昵称列表和prompt映射字典
@@ -506,19 +513,11 @@ def _fetch_untrusted_providers():
     global _BLACKLIST_FETCHED, _BLACKLIST_STRINGS
     if _BLACKLIST_FETCHED:
         return _BLACKLIST_STRINGS
-    try:
-        resp = requests.get("https://vg.v1api.cc/black", timeout=3)
-        resp.raise_for_status()
-        data = resp.json()
-        items = data.get("data") if isinstance(data, dict) else None
-        if isinstance(items, list):
-            _BLACKLIST_STRINGS = [str(x).lower() for x in items if x]
-        else:
-            _BLACKLIST_STRINGS = []
-    except Exception as e:
-        _BLACKLIST_STRINGS = None
-    finally:
-        _BLACKLIST_FETCHED = True
+    # Deployment privacy hardening: do not phone home to the project's
+    # third-party provider blacklist.  This deployment uses the official
+    # DeepSeek endpoint configured locally.
+    _BLACKLIST_STRINGS = []
+    _BLACKLIST_FETCHED = True
     return _BLACKLIST_STRINGS
 
 def _is_base_url_untrusted(base_url: str) -> bool:
@@ -907,6 +906,19 @@ def inject_history_context(messages_to_send, user_id, message):
 
 
 # 修改get_user_prompt函数
+BUILTIN_PROMPTS_DIR = os.path.join(root_dir, 'prompts')
+LOCAL_PROMPTS_DIR = os.path.join(root_dir, 'prompts_local')
+
+
+def resolve_prompt_path(prompt_file):
+    """优先使用不受 Git 跟踪的本地 Prompt，其次才读取内置模板。"""
+    safe_prompt_file = sanitize_user_id_for_filename(prompt_file)
+    local_path = os.path.join(LOCAL_PROMPTS_DIR, f'{safe_prompt_file}.md')
+    if os.path.isfile(local_path):
+        return local_path
+    return os.path.join(BUILTIN_PROMPTS_DIR, f'{safe_prompt_file}.md')
+
+
 def get_user_prompt(user_id):
     # 启用了「聊天记录风格模仿」的用户：用生成的风格档案替代他的 prompt 文件，
     # 记忆仍按原来的规则合并进去（不然开了档案就丢记忆了）。
@@ -916,7 +928,7 @@ def get_user_prompt(user_id):
 
     # 查找映射中的文件名，若不存在则使用user_id
     prompt_file = prompt_mapping.get(user_id, user_id)
-    prompt_path = os.path.join(root_dir, 'prompts', f'{prompt_file}.md')
+    prompt_path = resolve_prompt_path(prompt_file)
     
     if not os.path.exists(prompt_path):
         logger.error(f"Prompt文件不存在: {prompt_path}")
@@ -3154,11 +3166,17 @@ def format_json_memories_for_prompt(memories):
 def append_to_memory_section(user_id, content):
     """将内容追加到用户prompt文件的记忆部分"""
     try:
-        prompts_dir = os.path.join(root_dir, 'prompts')
+        prompts_dir = LOCAL_PROMPTS_DIR
+        os.makedirs(prompts_dir, exist_ok=True)
         # 注意：这里应该使用prompt_name而不是user_id作为文件名
         prompt_name = prompt_mapping.get(user_id, user_id)
         safe_prompt_name = sanitize_user_id_for_filename(prompt_name)
         user_file = os.path.join(prompts_dir, f'{safe_prompt_name}.md')
+
+        if not os.path.exists(user_file):
+            built_in_file = resolve_prompt_path(safe_prompt_name)
+            if os.path.isfile(built_in_file):
+                shutil.copy2(built_in_file, user_file)
         
         # 确保用户文件存在
         if not os.path.exists(user_file):
@@ -3309,50 +3327,11 @@ def summarize_and_save(user_id, skip_check=False):
         # --- 存储记忆 ---
         current_time = datetime.now().strftime("%Y-%m-%d %A %H:%M")
         
-        # 根据配置选择存储方式
-        if get_dynamic_config('SAVE_MEMORY_TO_SEPARATE_FILE', SAVE_MEMORY_TO_SEPARATE_FILE):
-            # 保存到JSON文件
-            logger.info(f"将记忆保存到JSON文件，用户: {user_id}")
-            add_memory_to_json(user_id, current_time, summary, importance)
-        else:
-            # 保存到prompt文件
-            logger.info(f"将记忆保存到prompt文件，用户: {user_id}")
-            # 修正1：增加末尾换行
-            memory_entry = f"""## 记忆片段 [{current_time}]
-**重要度**: {importance}
-**摘要**: {summary}
-
-"""  # 注意这里有两个换行
-
-            prompt_name = prompt_mapping.get(user_id, user_id)
-            prompts_dir = os.path.join(root_dir, 'prompts')
-            os.makedirs(prompts_dir, exist_ok=True)
-
-            user_prompt_file = os.path.join(prompts_dir, f'{prompt_name}.md')
-            temp_file = f"{user_prompt_file}.tmp"
-            backup_file = f"{user_prompt_file}.bak"
-
-            try:
-                with open(temp_file, 'w', encoding='utf-8') as f:
-                    if os.path.exists(user_prompt_file):
-                        with open(user_prompt_file, 'r', encoding='utf-8') as src:
-                            f.write(src.read().rstrip() + '\n\n')  # 修正2：规范化原有内容结尾
-                
-                    # 写入预格式化的内容
-                    f.write(memory_entry)  # 不再重复生成字段
-
-                # 步骤2：备份原文件
-                if os.path.exists(user_prompt_file):
-                    shutil.copyfile(user_prompt_file, backup_file)
-
-                # 步骤3：替换文件
-                shutil.move(temp_file, user_prompt_file)
-
-            except Exception as e:
-                # 异常恢复流程
-                if os.path.exists(backup_file):
-                    shutil.move(backup_file, user_prompt_file)
-                raise
+        # 记忆始终写入已忽略的 CoreMemory JSON，避免用户聊天内容污染 Prompt 模板。
+        if not get_dynamic_config('SAVE_MEMORY_TO_SEPARATE_FILE', SAVE_MEMORY_TO_SEPARATE_FILE):
+            logger.warning('SAVE_MEMORY_TO_SEPARATE_FILE=False 已废弃；为保护隐私仍将记忆保存到 CoreMemory JSON。')
+        logger.info(f"将记忆保存到JSON文件，用户: {user_id}")
+        add_memory_to_json(user_id, current_time, summary, importance)
 
         # --- 清理日志 ---
         with open(log_file, 'w', encoding='utf-8') as f:
@@ -3555,16 +3534,9 @@ def manage_core_memory_capacity(user_id):
         logger.error(f"管理用户 {user_id} 的JSON记忆容量失败: {e}")
 
 def manage_user_memory_capacity(user):
-    """根据配置管理用户的记忆容量（prompt文件或JSON文件）"""
+    """管理用户的独立 JSON 记忆容量。"""
     try:
-        if get_dynamic_config('SAVE_MEMORY_TO_SEPARATE_FILE', SAVE_MEMORY_TO_SEPARATE_FILE):
-            # 清理JSON文件中的记忆
-            manage_core_memory_capacity(user)
-        else:
-            # 清理prompt文件中的记忆
-            prompt_name = prompt_mapping.get(user, user)
-            user_prompt_file = os.path.join(root_dir, 'prompts', f'{prompt_name}.md')
-            manage_memory_capacity(user_prompt_file)
+        manage_core_memory_capacity(user)
     except Exception as e:
         logger.error(f"管理用户 {user} 记忆容量失败: {e}")
 
@@ -4714,7 +4686,7 @@ def main():
                                f"本次仍用 prompt 文件「{prompt_mapping.get(user, user)}」。"
                                f"要用档案请在配置页勾选该用户的「读聊天记录」并保存配置。")
             prompt_file = prompt_mapping.get(user, user)
-            prompt_path = os.path.join(root_dir, 'prompts', f'{prompt_file}.md')
+            prompt_path = resolve_prompt_path(prompt_file)
             if not os.path.exists(prompt_path):
                 raise FileNotFoundError(f"用户 {user} 的prompt文件 {prompt_file}.md 不存在")
 

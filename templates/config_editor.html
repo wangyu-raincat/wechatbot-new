@@ -2632,7 +2632,10 @@
                 '31': '#ff4444', '32': '#4CAF50', '33': '#ffb74d',
                 '34': '#333333', '35': '#ab47bc', '36': '#26c6da', '37': '#e0e0e0'
             };
-            return text.replace(/\033\[([0-9;]+)m/g, (match, code) => {
+            const escapedText = String(text).replace(/[&<>"']/g, (character) => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            })[character]);
+            return escapedText.replace(/\033\[([0-9;]+)m/g, (match, code) => {
                 const codes = code.split(';');
                 let style = '';
                 codes.forEach(c => {
@@ -3912,7 +3915,7 @@ document.getElementById('oneKeyDiagnosticButton').addEventListener('click', asyn
 
                             <div class="form-group">
                                 <label>API Key:</label>
-                                <input type="text" placeholder="sk-xxxxxxxxxx" name="FORUM_API_KEY" value="{{ config.FORUM_API_KEY }}" class="api-key-input">
+                                <input type="password" placeholder="sk-xxxxxxxxxx" name="FORUM_API_KEY" value="{{ config.FORUM_API_KEY }}" class="api-key-input" autocomplete="new-password">
                                 <small class="api-key-hint">{{ "出于安全考虑，已隐藏完整API Key。如需修改，请直接输入新的API Key。" if "*" in config.FORUM_API_KEY else "" }}</small>
                             </div>
 
@@ -4020,7 +4023,7 @@ document.getElementById('oneKeyDiagnosticButton').addEventListener('click', asyn
                     </div>
                     <div class="form-group">
                         <label>API Key:</label>
-                        <input type="text" placeholder="sk-xxxxxxxxxx" name="DEEPSEEK_API_KEY" value="{{ config.DEEPSEEK_API_KEY }}" class="api-key-input">
+                        <input type="password" placeholder="sk-xxxxxxxxxx" name="DEEPSEEK_API_KEY" value="{{ config.DEEPSEEK_API_KEY }}" class="api-key-input" autocomplete="new-password">
                         <small class="api-key-hint">{{ "出于安全考虑，已隐藏完整API Key。如需修改，请直接输入新的API Key。" if "*" in config.DEEPSEEK_API_KEY else "" }}</small>
                     </div>
                     <div class="form-group">
@@ -4079,7 +4082,7 @@ document.getElementById('oneKeyDiagnosticButton').addEventListener('click', asyn
                         </div>
                         <div class="form-group">
                             <label>辅助模型API Key:</label>
-                            <input type="text" placeholder="sk-xxxxxxxxxx" name="ASSISTANT_API_KEY" value="{{ config.ASSISTANT_API_KEY }}" class="api-key-input">
+                            <input type="password" placeholder="sk-xxxxxxxxxx" name="ASSISTANT_API_KEY" value="{{ config.ASSISTANT_API_KEY }}" class="api-key-input" autocomplete="new-password">
                             <small class="api-key-hint">{{ "出于安全考虑，已隐藏完整API Key。如需修改，请直接输入新的API Key。" if "*" in config.ASSISTANT_API_KEY else "" }}</small>
                             <small>可与主模型使用相同的API Key，或使用单独的API Key以分别管理成本。</small>
                         </div>
@@ -4145,7 +4148,7 @@ document.getElementById('oneKeyDiagnosticButton').addEventListener('click', asyn
                     </div>
                     <div class="form-group">
                         <label>API Key:</label>
-                        <input type="text" placeholder="sk-xxxxxxxxxx" name="MOONSHOT_API_KEY" value="{{ config.MOONSHOT_API_KEY }}" class="api-key-input">
+                        <input type="password" placeholder="sk-xxxxxxxxxx" name="MOONSHOT_API_KEY" value="{{ config.MOONSHOT_API_KEY }}" class="api-key-input" autocomplete="new-password">
                         <small class="api-key-hint">{{ "出于安全考虑，已隐藏完整API Key。如需修改，请直接输入新的API Key。" if "*" in config.MOONSHOT_API_KEY else "" }}</small>
                     </div>
                     <div class="form-group">
@@ -4185,7 +4188,7 @@ document.getElementById('oneKeyDiagnosticButton').addEventListener('click', asyn
                     </div>
                     <div class="form-group">
                         <label>联网API Key:</label>
-                        <input type="text" placeholder="sk-xxxxxxxxxx" name="ONLINE_API_KEY" value="{{ config.ONLINE_API_KEY }}" class="api-key-input">
+                        <input type="password" placeholder="sk-xxxxxxxxxx" name="ONLINE_API_KEY" value="{{ config.ONLINE_API_KEY }}" class="api-key-input" autocomplete="new-password">
                         <small class="api-key-hint">{{ "出于安全考虑，已隐藏完整API Key。如需修改，请直接输入新的API Key。" if "*" in config.ONLINE_API_KEY else "" }}</small>
                     </div>
                     <div class="form-group">
@@ -4618,7 +4621,7 @@ document.getElementById('oneKeyDiagnosticButton').addEventListener('click', asyn
                     </div>
                     <div class="form-group">
                         <label>登录密码:</label>
-                        <input type="text" name="LOGIN_PASSWORD" value="{{ config.LOGIN_PASSWORD }}">
+                        <input type="password" name="LOGIN_PASSWORD" value="{{ config.LOGIN_PASSWORD }}" autocomplete="new-password">
                     </div>
                     <div class="form-group">
                         <label>网页端口:</label>
