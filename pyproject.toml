@@ -4,78 +4,48 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wechatbot-new"
-version = "2.2.8.2"
-description = "智能微信聊天机器人（基于 KouriChat 重构）：接入 DeepSeek/GPT/Gemini 大模型，拟人化角色扮演、记忆、情绪表情包、定时任务、联网搜索；兼容微信 4.1.12+，底层使用 wechatauto-replica"
-readme = "readme.md"
+version = "3.0.0"
+description = "微信自动回复：监听指定联系人或群聊，调用 DeepSeek 等 OpenAI 兼容接口生成回复。仅 Windows，需已登录微信。"
+readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "GPL-3.0-or-later" }
-keywords = ["wechat", "weixin", "wechat-bot", "chatbot", "ai", "llm", "deepseek", "gpt", "kourichat", "roleplay", "automation", "wechatauto"]
+keywords = ["wechat", "weixin", "chatbot", "deepseek"]
 classifiers = [
-    "Development Status :: 4 - Beta",
     "Environment :: Win32 (MS Windows)",
-    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     "Natural Language :: Chinese (Simplified)",
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
     "Topic :: Communications :: Chat",
-    "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
     "wechatauto-replica[guia]>=1.2.4.4",
-    "flask",
-    "werkzeug",
     "openai==1.84.0",
-    "psutil",
-    "filelock",
-    "requests",
-    "beautifulsoup4",
-    "lxml",
-    "websocket-client",
 ]
 
 [project.urls]
-Homepage = "https://github.com/sangheegulino168-design/wechatbot-new"
-Source = "https://github.com/sangheegulino168-design/wechatbot-new"
-Issues = "https://github.com/sangheegulino168-design/wechatbot-new/issues"
+Homepage = "https://github.com/wangyu-raincat/wechatbot-new"
+Source = "https://github.com/wangyu-raincat/wechatbot-new"
 
 [project.scripts]
 wechatbot = "bot:main"
-wechatbot-webui = "config_editor:main"
 
 [tool.setuptools]
-py-modules = ["bot", "config", "config_editor", "run", "test_bot", "test_wxbot", "wxbot", "qqbot"]
+py-modules = ["bot", "config", "run", "wxbot"]
 include-package-data = true
 
 [tool.setuptools.packages.find]
-include = ["emojis*", "prompts*", "templates*", "Demo_Image*"]
-exclude = [
-    "prompts_local*",
-    "CoreMemory*",
-    "Memory_Temp*",
-    "core_memory*",
-    "memory_temp*",
-    "forum_data*",
-    "qq_media*",
-    "数据备份*",
-]
+include = ["prompts*"]
 
 [tool.setuptools.package-data]
-"*" = ["*", "*/*", "*/*/*", "*/*/*/*"]
+"*" = ["*.md"]
 
 [tool.setuptools.exclude-package-data]
 "*" = [
-    "*.备份_*.md",
-    "小深.md",
     "config_local.py",
     ".env",
     ".env.*",
     "*.log",
     "*.pid",
-    "*.lock",
-    "qrcode.png",
-    "onebot11_*.json",
+    "chat_contexts.json",
 ]

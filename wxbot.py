@@ -1,33 +1,11 @@
 # -*- coding: utf-8 -*-
-"""
-wxbot —— 兼容层
-让 WeChatBot 项目无需 wxautox4_wechatbot 即可运行。
+"""微信收发兼容层。
 
-用法：把 bot.py 顶部的导入
-    from wxautox4_wechatbot import WeChat
-改成
-    from wxbot import WeChat
-
-底层由 wechatauto 驱动：数据库监听接收 + 坐标/OCR 界面发送，
-适配当前微信 4.x 自绘渲染（wxautox 旧版依赖的 x11 window 结构已不存在）。
-
-差异说明：
-  * 消息接收走本地数据库轮询（每秒一次），延迟约 1~2 秒。
-  * 发送走坐标/OCR（打开会话 -> 输入 -> 回车），比旧版稍慢；
-    默认用 wechatauto 的 fast 档节奏（见下方 WECHATAUTO_RHYTHM）。
-  * 语音转文字、合并转发解析在兼容层不支持，会安全降级
-    （返回空值/记录日志），不影响其它功能；语音取不到时用
-    WxMessage.voice_note() 说明原因（没在微信里播放过 vs 库/索引问题）。
-  * 拍一拍/撤回/语音通话已接上 wechatauto（UIA 热激活 + OCR），
-    分别对应 WxMessage.tickle() / select_option('撤回') / WeChat.VoiceCall()。
-  * 群消息发送者身份来自 wechatauto 1.2.4.1：WxMessage.sender_wxid 是真 wxid，
-    WxMessage.sender 是备注/昵称，群里的图片/文件/语音同样能认出人。
-  * 新增纯读库能力（都不驱动界面）：WeChat.GetGroupMembers() 群成员、
-    GetRecalled() 撤回记录（配 StartRecallGuard()）、
-    GetMoments() / GetNewMoments() / GetMomentInteractions() 朋友圈。
+数据库轮询收消息，坐标/OCR 发消息，适配微信 4.x。
+自己发的消息靠 status 和表情 XML 认出来，避免机器人回复自己。
+卡片、表情、合并转发收成一行可读文字，不把整段 XML 交给模型。
 """
 
-import glob
 import logging
 import os
 import re
@@ -35,23 +13,32 @@ import sqlite3
 import threading
 import time
 
-# wechatauto 1.2.3 起对每次对外写动作（发送/点赞/评论…）默认按 natural 档限速：
-# 间隔 2.5~6s、120s 内 6 次后冷却 30~75s。本项目是连发多段的聊天机器人，
-# 会被拖住，所以默认改成 fast 档（间隔 0.6~1.4s、20 次/120s）。用户自己设的
-# 同名环境变量优先（setdefault），要更保守可设 WECHATAUTO_RHYTHM=natural。
+# wechatauto 默认 natural 档会把连发拖住。这里用 fast 档；
+# 用户自己设的同名环境变量优先。
 os.environ.setdefault("WECHATAUTO_RHYTHM", "fast")
 
-from PIL import ImageStat
+log = logging.getLogger("wxbot")
+_BACKEND_ERROR = None
 
-from wechatauto.guia import WeChatGUI as _WeChatGUI
-from wechatauto.db import WeChatDB
-
-from wechatauto.wx import WeChat as _BaseWeChat
-from wechatauto.wx import Chat as _BaseChat
-from wechatauto import MediaDownloader
-from wechatauto.moment import MomentDB
-from wechatauto.param import WxResponse
-from wechatauto import wxlog
+try:
+    from wechatauto.guia import WeChatGUI as _WeChatGUI
+    from wechatauto.db import WeChatDB
+    from wechatauto.wx import WeChat as _BaseWeChat
+    from wechatauto.wx import Chat as _BaseChat
+    from wechatauto import MediaDownloader
+    from wechatauto.param import WxResponse
+    from wechatauto import wxlog
+    from PIL import ImageStat
+except ImportError as exc:
+    _BACKEND_ERROR = exc
+    ImageStat = None
+    _WeChatGUI = None
+    WeChatDB = None
+    _BaseWeChat = object
+    _BaseChat = object
+    MediaDownloader = None
+    WxResponse = None
+    wxlog = log
 
 
 def _desktop_available_theme_compatible(self):
@@ -72,14 +59,11 @@ def _desktop_available_theme_compatible(self):
     return max(stats.stddev) >= 4.0 and any(high - low >= 24 for low, high in stats.extrema)
 
 
-_WeChatGUI.desktop_available = _desktop_available_theme_compatible
-# Do not minimize the user's other applications while preparing a send.  The
-# WeChat window is raised only for the few seconds needed by the 4.x client.
-_WeChatGUI._minimize_blockers = lambda self: 0
+if _WeChatGUI is not None and ImageStat is not None:
+    _WeChatGUI.desktop_available = _desktop_available_theme_compatible
+    # 发消息时只把微信提到前台几秒，不最小化用户正在用的其它窗口。
+    _WeChatGUI._minimize_blockers = lambda self: 0
 
-log = logging.getLogger("wxbot")
-
-_IMG_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")
 _URL_RE = re.compile(r"https?://[^\s\"'<>\[\]]+")
 
 # 微信自己的资源域名：卡片 XML 里到处是这种 stodownload / 头像 / 客服链接，
@@ -217,11 +201,11 @@ def _fold_xml_content(text, type_cn):
     if type_cn == "动画表情":
         return "[动画表情]"
     if type_cn == "图片":
-        return ""          # 图片正文本来就没人看，交给识图流程
+        return "[图片]"
     if type_cn == "视频":
         return "[视频]"
     if type_cn == "语音":
-        return ""          # 语音走 voice_note() 说明可用性
+        return "[语音]"
     if type_cn == "位置":
         place = _tag_val(text, "location", "label", "poiname", "title")
         return ("[位置] " + place).strip()
@@ -268,15 +252,6 @@ def _decode_cell(value):
     return value
 
 
-# wechatauto 语音可用性的 reason -> 说明（见 MediaDownloader.list_voice_status）
-_VOICE_REASON_ZH = {
-    "audio_not_downloaded": "微信没把这段音频存到本地（要在微信里播放过一次才有）",
-    "audio_missing_from_media_db": "音频索引里查不到这段音频",
-    "session_not_in_media_index": "这个会话不在音频索引里",
-    "no_server_id": "这条语音没有服务端 ID",
-    "empty_blob": "音频数据是空的",
-}
-
 # 微信数据库中文类型 -> bot 使用的英文类型
 _TYPE_MAP = {
     "文本": "text",
@@ -319,87 +294,6 @@ def _strip_tags(text):
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _extract_url(blob):
-    m = _URL_RE.search(blob)
-    return m.group(0) if m else None
-
-
-def read_history_text(who, limit=30, max_chars=4000, db=None):
-    """纯读库版聊天记录（不启动 GUI/UIA），配置编辑器用这个。
-
-    和 :meth:`WeChat.GetHistoryText` 同一套格式化逻辑，只是不依赖界面，
-    每次自己开一个 :class:`WeChatDB`（传 ``db`` 可复用已有实例）。
-
-    Returns:
-        (username, text)：解析不到会话是 (None, "")；读库失败时 username
-        有值、text 为空串，调用方据此区分「没这个人」和「读不到」。
-    """
-    from wechatauto.db import WeChatDB
-
-    if db is None:
-        try:
-            db = WeChatDB()
-        except Exception as e:
-            wxlog.warning("打开微信数据库失败: %s" % e)
-            return None, ""
-    text_db = db
-    uname = None
-    name = (who or "").strip()
-    if not name:
-        # 空名字绝不能往下走：search_contact("") 会命中昵称为空的
-        # notifymessage 会话，读出来是「有 username 但没内容」的假成功。
-        return None, ""
-    if name.endswith("@chatroom") or name.startswith(("wxid_", "gh_")):
-        uname = name
-    elif name in ("filehelper", "文件传输助手"):
-        uname = "filehelper"
-    else:
-        for _ in range(5):
-            try:
-                for hit in text_db.search_contact(name):
-                    if name in (hit.get("nick_name"), hit.get("remark")):
-                        uname = hit["username"]
-                        break
-                break
-            except (sqlite3.DatabaseError, sqlite3.OperationalError) as e:
-                log.warning("数据库暂不可用(解析会话): %s", e)
-                time.sleep(1.5)
-        if uname is None:
-            # 群不在 search_contact 的覆盖范围里（实测 5/5 个群按群名读不到，
-            # 按 xxx@chatroom 才读到），拿 nickname_map 反查一次。
-            try:
-                for u, n in (text_db.nickname_map() or {}).items():
-                    if n == name:
-                        uname = u
-                        break
-            except Exception as e:
-                log.warning("按昵称反查会话失败: %s" % e)
-        if uname is None:
-            # 也可能直接传了个 username 进来
-            uname = name
-    if not uname:
-        return None, ""
-
-    def nick_of(wxid):
-        try:
-            return text_db.nickname_map().get(wxid, "") or ""
-        except Exception:
-            return ""
-
-    try:
-        rows = text_db.get_messages(uname, limit=max(1, _as_int(limit, 30)))
-    except Exception as e:
-        wxlog.warning("读取聊天记录失败 (%s): %s" % (who, e))
-        return uname, ""
-    is_group = uname.endswith("@chatroom")
-    # 群里的"对方"不是一个人：正文里没有 wxid 前缀的那几条（图片/表情/语音）
-    # 只能标成一个不带名字的群成员，别拿串号的名字冒充，也别写成"对方"骗模型是一对一。
-    peer_nick = "群成员" if is_group else (nick_of(uname) or uname)
-    return uname, format_history_rows(rows, nick_of, peer_nick=peer_nick,
-                                       max_chars=_as_int(max_chars, 0),
-                                       self_ids=resolve_self_ids(text_db, uname, rows))
-
-
 def _as_int(value, default=0):
     try:
         return int(value)
@@ -409,7 +303,6 @@ def _as_int(value, default=0):
 
 _XML_SELF_RE = re.compile(r'fromusername\s*=\s*["\']?\s*([A-Za-z0-9_\-@]+)')
 _MSG_TABLE_RE = re.compile(r'^Msg_[0-9a-f]{32}$')
-_SENDER_PREFIX_RE = re.compile(r"^(wxid_[^\s:\n]+|gh_[^\s:\n]+|\d{6,}):\n")
 
 
 def status_votes(db, username, since=0, until=0, cap=0):
@@ -510,60 +403,6 @@ def resolve_self_ids(db, username, rows=None, cap=0):
         votes = {}
     ids, _ev = classify_senders(rows or [], own, votes)
     return ids
-
-
-def format_history_rows(rows, nick_of=None, self_nick="我", peer_nick="",
-                        max_chars=0, self_ids=None):
-    """把 ``db.get_messages()`` 的消息行转成可读文本，用于喂给模型。
-
-    每行 ``[月-日 时:分] 名字：内容``。行序按 ``sort_seq``（同值时按 ``local_id``）
-    **升序**排好 —— ``WeChatDB.get_messages()`` 返回的是「最近 N 条、新的在前」，
-    直接顺着读会变成倒着说话。名字的取法：自己发的用 ``self_nick``，
-    群里其它人优先用真实 wxid 换备注/昵称（wechatauto 1.2.4.1 的
-    ``sender_username``），私聊用 ``peer_nick``。非文本消息只写类型
-    （``[图片]`` 等），系统/撤回消息丢掉——它们对「模仿说话风格」没用，
-    还会把微信自己的文案带进上下文。
-
-    Args:
-        rows: ``WeChatDB.get_messages()`` 返回的行。
-        nick_of: ``wxid -> 备注/昵称`` 的函数，缺省就不换名。
-        self_nick: 账号主人这一方显示成什么，默认「我」。
-        peer_nick: 私聊对方的名字；群聊里用不到（按每条消息的发送者取名）。
-        max_chars: >0 时从**头部**截断（保留最近的对话）。
-    """
-    ordered = sorted(rows or [], key=lambda r: (_as_int(r.get("sort_seq")),
-                                                _as_int(r.get("local_id"))))
-    self_ids = self_ids if self_ids else {"2"}
-    lines = []
-    for row in ordered:
-        type_cn = row.get("type") or ""
-        if type_cn in ("系统消息", "撤回消息"):
-            continue
-        content = _to_text(row.get("content")).strip()
-        m = _SENDER_PREFIX_RE.match(content)
-        if type_cn and type_cn != "文本":
-            # 语音/图片/表情这些没有可直接模仿的文字，只留类型标记
-            content = "[%s]" % type_cn
-        else:
-            content = (content[m.end():] if m else content).strip()
-        if not content:
-            continue
-        sender_id = row.get("sender_id")
-        if str(sender_id) in self_ids:
-            who = self_nick
-        elif m:
-            # 群里：正文前缀里的 wxid 才是发送者。sender_username 拿的是
-            # message_resource 的全局 rowid，跨分片会串号，不能用来认人。
-            who = (nick_of(m.group(1)) if nick_of else "") or m.group(1)
-        else:
-            who = peer_nick or "对方"
-        ts = _as_int(row.get("create_time"))
-        stamp = time.strftime("%m-%d %H:%M", time.localtime(ts)) if ts else "时间未知"
-        lines.append("[%s] %s：%s" % (stamp, who, content))
-    text = "\n".join(lines)
-    if max_chars and len(text) > max_chars:
-        text = text[-max_chars:]
-    return text
 
 
 class WxMessage:
@@ -738,141 +577,6 @@ class WxMessage:
     def get_messages(self):
         return self._merge or []
 
-    def voice_status(self):
-        """这条语音的音频到底在不在本地（委托 wechatauto 的 voice_status）。
-
-        取不到音频时 `download_voice()` 只返回 None，调用方分不清「微信本地
-        根本没存这段音频」和「库读挂了」；这里给出 reason。非语音/查不到返回 {}。
-        """
-        if self.type != "voice" or not self._chat or self.local_id is None:
-            return {}
-        wxid = getattr(self._chat, "_wxid", None)
-        if not wxid:
-            return {}
-        try:
-            return self._media.voice_status(wxid, self.local_id) or {}
-        except Exception as e:
-            wxlog.debug("语音状态查询失败: %s" % e)
-            return {}
-
-    def voice_note(self):
-        """语音可用性的一句话说明（供拼进模型上下文）。非语音返回空串。"""
-        if self.type != "voice":
-            return ""
-        status = self.voice_status()
-        reason = status.get("reason")
-        if reason == "ok":
-            return "音频在本地，但本兼容层不做语音转文字"
-        if reason:
-            return _VOICE_REASON_ZH.get(reason, "音频不可用 (%s)" % reason)
-        return "音频不可用"
-
-    def download(self):
-        if (
-            self.type == "image"
-            and self._chat
-            and getattr(self._chat, "_wxid", None)
-            and self.local_id is not None
-        ):
-            try:
-                p = self._media.download_image(self._chat._wxid, self.local_id)
-                if p:
-                    return p
-            except Exception as e:
-                log.warning("图片下载失败: %s", e)
-            # 原图未下载到本地时，回退到缩略图 _t.dat，图片识别仍可用
-            try:
-                return self._download_thumbnail()
-            except Exception as e:
-                log.warning("缩略图下载失败: %s", e)
-        return None
-
-    def _download_thumbnail(self):
-        row = self._db.get_message_row(self._chat._wxid, self.local_id)
-        if not row:
-            return None
-        md5 = self._media._img_md5(row)
-        if not md5:
-            return None
-        base = os.path.join(self._db.account_dir, "msg", "attach")
-        hits = glob.glob(os.path.join(base, "**", md5 + "_t.dat"), recursive=True)
-        if not hits:
-            return None
-        data = self._media.decrypt_image(hits[0])
-        if not data:
-            return None
-        if data[:4] == b"\x89PNG":
-            ext = "png"
-        elif data[:3] == b"GIF":
-            ext = "gif"
-        else:
-            ext = "jpg"
-        out = os.path.join(
-            self._media.save_dir, "%s_%s_thumb.%s" % (self._chat._wxid, self.local_id, ext)
-        )
-        os.makedirs(self._media.save_dir, exist_ok=True)
-        with open(out, "wb") as f:
-            f.write(data)
-        return out
-
-    def capture(self, save_dir: str = None):
-        """截取当前表情消息画面，返回图片路径；失败返回 None。
-
-        委托 wechatauto 的 EmojiMessage.capture()：打开会话 → 滚动到底 →
-        对最后一条消息区域截图并自动裁剪。非表情消息返回 None。
-        """
-        if self.type != "emotion":
-            return None
-        try:
-            from wechatauto.wx import _db_row_to_message
-
-            # 兼容层把 "表情"/"动画表情" 都归一为 emotion，但 wechatauto
-            # 的消息工厂只认 "动画表情"，这里统一后再委托。
-            row = dict(self._row)
-            if row.get("type") == "表情":
-                row["type"] = "动画表情"
-            msg = _db_row_to_message(row, self._chat, self._self_wxid)
-            return msg.capture(save_dir)
-        except Exception as e:
-            log.warning("表情截图失败: %s", e)
-            return None
-
-    def tickle(self, who: str = None) -> bool:
-        """对消息所在会话的对方发起「拍一拍」。
-
-        委托 wechatauto 的 Chat.Poke（右键对方头像 + OCR 菜单）。返回
-        是否成功。不指定 who 时拍当前会话对象。
-        """
-        try:
-            chat = self._chat
-            if chat is None:
-                log.warning("拍一拍失败: 无会话对象")
-                return False
-            resp = chat.Poke(who or getattr(chat, "who", None))
-            return bool(resp and resp.get("status") in ("成功",))
-        except Exception as e:
-            log.warning("拍一拍失败: %s", e)
-            return False
-
-    def select_option(self, option: str, **kwargs) -> bool:
-        """对消息所在会话执行菜单操作（当前支持「撤回」）。
-
-        委托 wechatauto 的 Chat.RecallLastMessage。返回是否成功。
-        """
-        if option not in ("撤回", "recall"):
-            log.info("select_option(%s) 暂不支持，已忽略", option)
-            return False
-        try:
-            chat = self._chat
-            if chat is None:
-                log.warning("撤回失败: 无会话对象")
-                return False
-            resp = chat.RecallLastMessage(getattr(chat, "who", None))
-            return bool(resp and resp.get("status") in ("成功",))
-        except Exception as e:
-            log.warning("撤回失败: %s", e)
-            return False
-
     def __str__(self):
         return "<WxMessage %s from %s: %s>" % (self.type, self.sender, self.content[:50])
 
@@ -917,8 +621,6 @@ class WeChat(_BaseWeChat):
                 wxlog.set_debug(True)
                 wxlog.debug("Debug mode is on")
         self._media = MediaDownloader(self._db)
-        self._recall_guard = None
-        self._moment_db_cache = None
 
     # ------------------------------------------------------------- 消息监听
 
@@ -1027,27 +729,6 @@ class WeChat(_BaseWeChat):
             except Exception:
                 pass
 
-    def SendFiles(self, filepath, who=None, **kwargs):
-        user32 = __import__('ctypes').windll.user32
-        previous = user32.GetForegroundWindow()
-        who = self._display_name(who)
-        try:
-            if isinstance(filepath, str) and filepath.lower().endswith(_IMG_EXTS):
-                try:
-                    return self._gui.send_image(filepath, who)
-                except Exception as e:
-                    log.warning("send_image 失败，回退为文件发送: %s", e)
-            return super().SendFiles(filepath, who=who, **kwargs)
-        finally:
-            try:
-                self._gui.restore_zorder()
-                if previous and previous != self._gui.main_hwnd and user32.IsWindow(previous):
-                    user32.SetForegroundWindow(previous)
-            except Exception:
-                pass
-
-    # ----------------------------------------------------------- 会话/窗口
-
     def GetListenChatType(self, nickname):
         """直接从已注册的监听对象读取聊天类型，避免全量扫描会话。
 
@@ -1066,247 +747,3 @@ class WeChat(_BaseWeChat):
             return None
         return info.get("chat_type")
 
-    def GetAllSubWindow(self):
-        """返回所有会话的 Chat 实例（用于 bot 判断群聊/私聊）。
-
-        会话上限从 50 提到 500：wechatauto 自己的监听发现用的就是 500，
-        50 会让「最近 50 个会话之外」的群聊判不出类型（get_chat_type_info
-        的回退路径依赖这个列表）。
-        """
-        subs = []
-        try:
-            for row in self._db.get_sessions(limit=500):
-                username = row.get("username")
-                if not username:
-                    continue
-                name = username
-                try:
-                    nick = self._db.get_nickname(username)
-                    if nick and nick != username:
-                        name = nick
-                except Exception:
-                    pass
-                chat = _BaseChat(name, self._gui, self._db)
-                if username != chat._wxid:
-                    chat._wxid = username
-                subs.append(chat)
-        except Exception as e:
-            log.warning("GetAllSubWindow 失败: %s", e)
-        return subs
-
-    def _as_session_username(self, name):
-        """把会话标识统一成 username。
-
-        传进来的可能已经是 username（`xxx@chatroom` / `wxid_xxx`），这时不能
-        再走一遍通讯录搜索——`_resolve_uname` 是按昵称/备注匹配的，对群 wxid
-        会返回 None，于是「按 wxid 查群成员」会查不到。
-        """
-        if not name:
-            return None
-        text = str(name)
-        if text.endswith("@chatroom") or text.startswith(("wxid_", "gh_")):
-            return text
-        if text in ("filehelper", "文件传输助手"):
-            return "filehelper"
-        try:
-            return self._resolve_uname(text)
-        except Exception:
-            return None
-
-    # --------------------------------------------------------------- 群成员
-
-    def GetGroupMembers(self, nickname):
-        """群成员列表（静态读库，不点界面）。
-
-        每条含 username / nick_name / remark / is_owner。wechatauto 的
-        GetGroupMembers 只对 `@chatroom` 生效，配合监听回调里的
-        `msg.sender_wxid` 能认出「不在通讯录里的人」。非群聊/找不到返回 []。
-        """
-        uname = self._as_session_username(nickname or "")
-        if not uname or not uname.endswith("@chatroom"):
-            return []
-        try:
-            return self._db.get_group_members(uname) or []
-        except Exception as e:
-            wxlog.warning("群成员查询失败 (%s): %s" % (nickname, e))
-            return []
-
-    # ------------------------------------------------------------ 防撤回
-
-    def GetNickname(self, user):
-        """wxid/username -> 备注或昵称（拿不到就返回空串，不抛异常）。
-
-        朋友圈动态只给发布者 wxid，要对上「用户列表」里填的名字就得用它。
-        """
-        if not user:
-            return ""
-        try:
-            name = self._db.nickname_map().get(user, "")
-            if name:
-                return name
-        except Exception:
-            pass
-        try:
-            name = self._db.get_nickname(user)
-            return "" if name == user else (name or "")
-        except Exception:
-            return ""
-
-    def StartRecallGuard(self, backfill=50, scan_interval=None, scan_limit=None):
-        """挂上 wechatauto 的 RecallGuard（镜像 + 媒体备份 + 撤回复原）。
-
-        只读微信库、只写自己的镜像目录（默认 ~/Documents/wechatauto_recall），
-        不驱动界面。覆盖范围是当前**已监听**的会话：传 users=None 给底层会
-        监听全部会话，轮询成本随会话数线性涨。
-
-        Args:
-            backfill: 启动时把每个会话最近多少条历史消息补进镜像（0 表示不补）。
-            scan_interval: 撤回轮询间隔秒数，None 用底层默认 2.0。
-            scan_limit: 每会话每轮重读最近多少条，None 用底层默认 30。
-
-        返回是否挂载成功。重复调用是幂等的。
-        """
-        if self._recall_guard is not None:
-            return True
-        if self._listener is None:
-            wxlog.warning("RecallGuard 未启动：监听器尚未启动")
-            return False
-        users = []
-        for name in list(self.listen.keys()):
-            try:
-                uname = self._resolve_uname(name)
-            except Exception:
-                uname = None
-            if uname and uname not in users:
-                users.append(uname)
-        if not users:
-            wxlog.warning("RecallGuard 未启动：监听列表为空")
-            return False
-        kwargs = {}
-        try:
-            if scan_interval:
-                kwargs["scan_interval"] = max(0.5, float(scan_interval))
-            if scan_limit:
-                kwargs["scan_limit"] = max(1, int(scan_limit))
-        except (TypeError, ValueError):
-            kwargs = {}
-        try:
-            from wechatauto.recall import RecallGuard
-
-            guard = RecallGuard(self._db, downloader=self._media, **kwargs)
-            guard.watch(self._listener, users=users, backfill=int(backfill or 0))
-        except Exception as e:
-            wxlog.warning("RecallGuard 启动失败: %s" % e)
-            return False
-        self._recall_guard = guard
-        log.info("防撤回已挂载，覆盖 %d 个会话", len(users))
-        return True
-
-    def StopRecallGuard(self):
-        guard, self._recall_guard = self._recall_guard, None
-        if guard is not None:
-            try:
-                guard.close()
-            except Exception as e:
-                wxlog.debug("RecallGuard 关闭异常: %s" % e)
-
-    def GetRecalled(self, chat=None, limit=20):
-        """撤回事件记录（新的在前）：chat/revoke_time/revoker/original_content。
-
-        chat 传昵称或 username，留空为全部会话。original_content 是监听期间
-        存进镜像的原文；监听之前就被撤回的救不回来，这一条会是空串。
-        未挂 RecallGuard 时返回 []。
-        """
-        if self._recall_guard is None:
-            return []
-        uname = self._as_session_username(chat) if chat else None
-        try:
-            return self._recall_guard.get_recalled(uname, limit=limit) or []
-        except Exception as e:
-            wxlog.warning("读取撤回记录失败: %s" % e)
-            return []
-
-    # ------------------------------------------------------------- 聊天记录
-
-    def ResolveSession(self, nickname):
-        """昵称/备注/username -> 会话 username；找不到返回 None。纯读库。"""
-        return self._as_session_username(nickname or "")
-
-    def GetHistoryText(self, who, limit=30, max_chars=4000):
-        """读某个会话最近的聊天记录并转成文本（纯读库，不驱动界面）。
-
-        Args:
-            who: 昵称、备注或 username。
-            limit: 读最近多少条消息（非文本只留类型标记）。
-            max_chars: 文本上限，超出从头部截断（保留最近的）。
-
-        Returns:
-            (username, text)：解析不到会话时是 (None, "")；读库失败时
-            username 有值、text 为空串，调用方据此区分「没这个人」和「读不到」。
-        """
-        return read_history_text(who, limit=limit, max_chars=max_chars, db=self._db)
-
-    # ------------------------------------------------------------ 朋友圈
-
-    def _moment_db(self):
-        if self._moment_db_cache is None:
-            self._moment_db_cache = MomentDB(self._db)
-        return self._moment_db_cache
-
-    def GetMoments(self, who=None, limit=5):
-        """读某人最近的朋友圈动态（纯读库，不驱动界面）。
-
-        who 传昵称/username；留空读自己的。返回 feed 列表，每条含
-        tid / nickname / text / create_time / images / videos / likes / comments。
-        """
-        try:
-            username = self._as_session_username(who) if who else None
-            return self._moment_db().get_moments(
-                username=username or self._db.wxid, limit=limit
-            ) or []
-        except Exception as e:
-            wxlog.warning("读取朋友圈失败 (%s): %s" % (who, e))
-            return []
-
-    def GetNewMoments(self, since_tid=None, limit=200):
-        """增量拉取比 since_tid 新的动态，返回 (feeds, new_latest_tid)。
-
-        适合自己写「有新朋友圈就处理」的轮询：无新动态时 feeds 为空、
-        new_latest_tid 为 None（水位不用推进）。
-
-        注意水位要用返回的 new_latest_tid（int），别用 feed['tid']：自己发的
-        动态 tid 是 wxid 字符串，拿它当水位会直接抛 TypeError。
-        """
-        try:
-            return self._moment_db().get_moments_since(since_tid, limit=limit)
-        except Exception as e:
-            wxlog.warning("增量读取朋友圈失败: %s" % e)
-            return [], None
-
-    def GetMomentInteractions(self, only_unread=False, limit=50):
-        """他人对我朋友圈的点赞/评论通知（SnsMessage_tmp3，纯读库）。
-
-        每条含 type(1=赞/2=评论)、from_nickname、content、create_time、unread。
-        """
-        try:
-            return self._moment_db().get_interactions(
-                limit=limit, only_unread=only_unread
-            ) or []
-        except Exception as e:
-            wxlog.warning("读取朋友圈互动失败: %s" % e)
-            return []
-
-    # ------------------------------------------------------------ 通话/撤回
-
-    def VoiceCall(self, user_id=None, **kwargs):
-        """发起语音通话（委托 wechatauto 的 Chat.VoiceCall）。
-
-        需 UIA 驱动可用（热激活后生效）；失败时返回 False 由调用方降级。
-        """
-        try:
-            chat = _BaseChat(user_id, self._gui, self._db)
-            resp = chat.VoiceCall(video=bool(kwargs.get("video", False)))
-            return bool(resp and resp.get("status") in ("成功",))
-        except Exception as e:
-            wxlog.warning("VoiceCall 失败 (%s): %s", user_id, e)
-            return False

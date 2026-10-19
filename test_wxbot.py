@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
-"""wxbot 读库层的桩测试：不启动微信、不碰界面，专测「这条是不是我发的」。
+"""wxbot 收消息的桩测试：不启动微信、不碰界面。
 
     python test_wxbot.py
 
-回归的起因：real_sender_id 是分片内的短编号，本机 2025-07~2026-02 自己是 4、
-2026-06 之后是 2。写死 `sender_id == 2` 会把整段旧历史里的我算成对方，
-风格档案于是照着对方的口吻写，再被当成这个人设发出去。
+real_sender_id 是分片内的短编号，不能写死 == 2，否则会把旧历史里的自己
+当成对方，机器人就会回复自己。
 """
 import sys
 import time
@@ -51,27 +50,10 @@ ck("名片里的 username 不算自证",
 gids = wxbot.classify_senders([row(s, T0 + i) for i, s in enumerate([2, 4, 5, 8])],
                               "wxid_me", {"2": [9, 0], "4": [10, 10], "5": [86, 0], "8": [367, 0]})[0]
 ck("群里判得出我之后，id=2 不再靠兜底冒充我", gids == {"4"}, sorted(gids))
+ck("表情 XML 收成一行", wxbot._fold_xml_content('<msg><emoji fromusername="wxid_me"/></msg>', "动画表情") == "[动画表情]")
+ck("普通文本保持原样", wxbot._fold_xml_content("你好", "文本") == "你好")
 
-# 2) 历史文本：说话人标签必须跟着判定走
-text = wxbot.format_history_rows([row(4, T0, "我说的"), row(69, T0 + 5, "你说的")],
-                                 {"wxid_peer": "小李"}.get, peer_nick="小李", self_ids={"4"})
-ck("旧编号年代标成「我」", text.splitlines()[0].endswith("我：我说的"), text.splitlines()[0])
-ck("单聊对方用昵称，不是串号的裸 wxid", text.splitlines()[1].endswith("小李：你说的"), text.splitlines()[1])
-old = wxbot.format_history_rows([row(4, T0, "我说的"), row(69, T0 + 5, "你说的")],
-                                {"wxid_peer": "小李"}.get, peer_nick="小李")
-ck("不传 self_ids 时退回老口径（可回滚）", "我：" not in old, old)
-grp = wxbot.format_history_rows([row(5, T0, "wxid_aaa:\n甲说的"), row(6, T0 + 5, "wxid_bbb:\n乙说的")],
-                                {"wxid_aaa": "群友甲"}.get, self_ids=set())
-ck("群里按正文前缀认人", grp.splitlines()[0].endswith("群友甲：甲说的"), grp.splitlines()[0])
-ck("群里认不出的人留原 wxid，不编名字", grp.splitlines()[1].endswith("wxid_bbb：乙说的"), grp.splitlines()[1])
-
-# 3) 同秒连发：get_messages 是"新的在前"，只按 create_time 稳定排序会倒着读
-same = wxbot.format_history_rows([row(4, T0, "我后说", sort_seq=12), row(4, T0, "我先说", sort_seq=11)],
-                                 None, self_ids={"4"})
-ck("同秒内按 sort_seq 正序（不跟着入参顺序走）",
-   0 <= same.index("我先说") < same.index("我后说"), same)
-
-# 4) 合并转发：以前 _merge 从没赋值，get_messages() 永远返回 None
+# 合并转发：解析失败时给空列表，不要把整段 XML 交给模型
 blob = ('<?xml version="1.0"?><msg chatrecord count="2" title="群聊的聊天记录">'
         '<record displaytype="4">'
         '<item type="0" sender="wxid_aaa" sname="甲" msg="今晚八点" asmantime="1750000000" />'

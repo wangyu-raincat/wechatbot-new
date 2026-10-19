@@ -1,23 +1,5 @@
-# ==================== 微信自动化核心库 ====================
-# 导入名为 wechatauto（发布名 wechatauto-replica）。guia 扩展提供
-# 「坐标+OCR」发送（GUI 操作，依赖 winsdk / pypinyin），wxbot.py 用到的
-# wechatauto.wx 会引入 guia。
+# 微信 4.x：数据库收消息，坐标/OCR 发消息（仅 Windows）
 wechatauto-replica[guia]>=1.2.4.4
 
-# ==================== Web UI ====================
-flask
-werkzeug
-
-# ==================== AI / LLM ====================
+# OpenAI 兼容接口（DeepSeek 官方或其它兼容服务）
 openai==1.84.0
-
-# ==================== 自动化与系统工具 ====================
-psutil
-filelock
-requests
-beautifulsoup4
-lxml
-
-# ==================== QQ (NapCat / OneBot v11) ====================
-# 仅 PLATFORM='qq' 时用到，用于接收 NapCat 的 WebSocket 事件流
-websocket-client

@@ -1,3 +1,5 @@
-from wxbot import WeChat
-wx = WeChat()
-wx.KeepRunning()  # 启动监听循环
+# -*- coding: utf-8 -*-
+from bot import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())
